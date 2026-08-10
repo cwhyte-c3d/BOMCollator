@@ -42,7 +42,9 @@ LEAD_COLUMN = "Lead Time (days)"
 DELIVERY_COLUMN = "Est. Delivery (if ordered today)"
 ORDERED_COLUMN = "Ordered"
 CURRENCY_COLUMNS = ["Unit Price", "Line Total"]
-SUM_COLUMNS = ["Total Quantity Required", "Order Qty", "Line Total"]
+# Only total the money. Summing quantities across unlike parts (metres of cable
+# plus counts of connectors) is meaningless, so those columns get no total.
+SUM_COLUMNS = ["Line Total"]
 TOTAL_LABEL = "TOTAL"
 TICK = "✔"  # heavy check mark
 
@@ -104,16 +106,27 @@ def format_workbook(input_path: Path, output_path: Path) -> None:
     if data and str(data[-1][0]).strip().upper() == TOTAL_LABEL:
         data.pop()
 
-    # New column order: Ordered first, drop unwanted columns, Est. Delivery
-    # after Lead Time, Description last. Lead Time and Est. Delivery are always
-    # present, even if the export predates them, so the "add it" reminder shows.
+    # New column order: Ordered first; drop unwanted columns; Lead Time and
+    # Est. Delivery sit next to the pricing (after Line Total); Description last.
+    # Lead Time / Est. Delivery are always present, even if the export predates
+    # them, so the "add it" reminder still shows.
     kept = [h for h in header if h not in DROP_COLUMNS]
-    if LEAD_COLUMN not in kept:
-        kept.append(LEAD_COLUMN)
-    if DESCRIPTION_COLUMN in kept:
-        kept.remove(DESCRIPTION_COLUMN)
+    for name in (LEAD_COLUMN, DELIVERY_COLUMN, DESCRIPTION_COLUMN):
+        if name in kept:
+            kept.remove(name)
+
+    # Anchor the lead-time pair just after the pricing.
+    for anchor in ("Line Total", "Order Qty", "Total Quantity Required"):
+        if anchor in kept:
+            at = kept.index(anchor) + 1
+            break
+    else:
+        at = len(kept)
+    kept[at:at] = [LEAD_COLUMN, DELIVERY_COLUMN]
+
+    had_description = DESCRIPTION_COLUMN in header
+    if had_description:
         kept.append(DESCRIPTION_COLUMN)
-    kept.insert(kept.index(LEAD_COLUMN) + 1, DELIVERY_COLUMN)
     kept.insert(0, ORDERED_COLUMN)
 
     src_index = {name: i for i, name in enumerate(header)}
