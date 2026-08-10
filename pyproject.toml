@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inventree-collated-bom-exporter"
+version = "0.2.0"
+description = "InvenTree BOM exporter that collates duplicate parts across sub-assemblies into one line each, with a stock check and pack-rounded order pricing."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Contour3D" }]
+keywords = ["inventree", "bom", "export", "plugin"]
+
+[project.entry-points."inventree_plugins"]
+CollatedBomExporter = "collated_bom_exporter:CollatedBomExporterPlugin"
+
+[tool.setuptools]
+py-modules = ["collated_bom_exporter"]
