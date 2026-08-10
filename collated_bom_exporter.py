@@ -19,16 +19,17 @@ Requires InvenTree 0.17.0 or newer (the data export plugin framework).
 from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
 
+from django.http import HttpResponse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 import rest_framework.serializers as serializers
 
 from InvenTree.helpers import normalize
-from part.models import BomItem
+from part.models import BomItem, Part
 from part.serializers import BomItemSerializer
 from plugin import InvenTreePlugin
-from plugin.mixins import DataExportMixin
+from plugin.mixins import DataExportMixin, UrlsMixin
 
 
 ZERO = Decimal(0)
@@ -109,7 +110,7 @@ class CollatedBomOptionsSerializer(serializers.Serializer):
     )
 
 
-class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
+class CollatedBomExporterPlugin(DataExportMixin, UrlsMixin, InvenTreePlugin):
     """Export a BOM with identical parts collated into one line each."""
 
     NAME = 'Collated BOM Exporter'
@@ -120,7 +121,7 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
         'a single line each, with true total quantities, a stock check and '
         'pack-rounded order pricing.'
     )
-    VERSION = '0.3.2'
+    VERSION = '0.4.0'
     AUTHOR = _('Contour3D')
 
     ExportOptionsSerializer = CollatedBomOptionsSerializer
@@ -154,12 +155,29 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
         self.export_pricing = context.get('export_pricing', True)
         self.round_to_packs = context.get('round_to_packs', True)
 
+        rows, grand_total = self._collate_rows(self.prefetch_queryset(queryset))
+
+        # Grand total row at the bottom.
+        if self.export_pricing:
+            total_row = {key: '' for key in headers.keys()}
+            total_row['part'] = str(_('TOTAL'))
+            total_row['line_total'] = normalize(grand_total)
+            rows.append(total_row)
+
+        return rows
+
+    def _collate_rows(self, top_items):
+        """Collate the BOM tree under the given top-level items.
+
+        Returns (rows, grand_total) where rows is the finalised list of dicts
+        (without the TOTAL row). Shared by the export dialog and the styled
+        download so both produce identical numbers.
+        """
         # part id -> collated row
         self.collated: "OrderedDict[int, dict]" = OrderedDict()
 
-        queryset = self.prefetch_queryset(queryset)
-        for bom_item in queryset:
-            self._process(bom_item, level=1, multiplier=ONE, **kwargs)
+        for bom_item in top_items:
+            self._process(bom_item, level=1, multiplier=ONE)
 
         rows = list(self.collated.values())
         grand_total = ZERO
@@ -235,14 +253,7 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
                         '_unit_price', '_supplier', '_sku', '_lead_time'):
                 row.pop(key, None)
 
-        # Grand total row at the bottom.
-        if self.export_pricing:
-            total_row = {key: '' for key in headers.keys()}
-            total_row['part'] = str(_('TOTAL'))
-            total_row['line_total'] = normalize(grand_total)
-            rows.append(total_row)
-
-        return rows
+        return rows, grand_total
 
     def _process(
         self,
@@ -565,3 +576,234 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
         columns['occurrences'] = _('Recurrences')
         columns['description'] = _('Description')
         return columns
+
+    # ---- One-click styled download -----------------------------------------
+    # This is the "always looks like that" path. The export dialog can only
+    # write plain data, so a fully styled workbook (colours, tick column,
+    # est. delivery) is built here with openpyxl and served as a download.
+
+    DOWNLOAD_COLUMNS = [
+        ('ordered', _('Ordered')),
+        ('part', _('Part')),
+        ('bom_level', _('BOM Level')),
+        ('total_quantity', _('Total Quantity Required')),
+        ('available_stock', _('Current Stock')),
+        ('shortfall', _('Shortfall')),
+        ('buildable', _('Enough In Stock')),
+        ('supplier', _('Supplier')),
+        ('order_quantity', _('Order Qty')),
+        ('unit_price', _('Unit Price')),
+        ('line_total', _('Line Total')),
+        ('lead_time', _('Lead Time (days)')),
+        ('est_delivery', _('Est. Delivery (if ordered today)')),
+        ('occurrences', _('Recurrences')),
+        ('description', _('Description')),
+    ]
+
+    LEAD_HELP = (
+        "Lead time is how long the item takes to get, in days. Record it on the "
+        "Part (Part > Parameters: 'Lead Time (days)', or Part > Notes: "
+        "'lead_time: 14'). Amber cells have none set yet."
+    )
+
+    def setup_urls(self):
+        """Expose the styled download at /plugin/collated-bom-exporter/."""
+        from django.urls import path
+
+        return [
+            path('download/<int:pk>/', self.download_formatted_bom,
+                 name='collated-bom-download'),
+        ]
+
+    def download_formatted_bom(self, request, pk):
+        """Build and return the fully styled collated BOM for a part."""
+        try:
+            part = Part.objects.get(pk=pk)
+        except Part.DoesNotExist:
+            return HttpResponse('Part not found', status=404)
+
+        # One-click download includes everything.
+        self.serializer_class = BomItemSerializer
+        self.components_only = True
+        self.export_levels = 0
+        self.export_stock_data = True
+        self.export_pricing = True
+        self.round_to_packs = True
+
+        items = BomItemSerializer.annotate_queryset(
+            self.prefetch_queryset(part.get_bom_items())
+        )
+        rows, grand_total = self._collate_rows(items)
+
+        content = self._build_workbook_bytes(rows, grand_total)
+        date = timezone.now().date().isoformat()
+        safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in str(part.name))
+        filename = f'Collated_BOM_{safe_name}_{date}.xlsx'
+        response = HttpResponse(
+            content,
+            content_type=(
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            ),
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+    def _build_workbook_bytes(self, rows, grand_total):
+        """Render the collated rows into a styled .xlsx and return the bytes."""
+        import io
+
+        from openpyxl import Workbook
+        from openpyxl.comments import Comment
+        from openpyxl.formatting.rule import CellIsRule, FormulaRule
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+        from openpyxl.worksheet.datavalidation import DataValidation
+
+        keys = [k for k, _label in self.DOWNLOAD_COLUMNS]
+        labels = [str(label) for _k, label in self.DOWNLOAD_COLUMNS]
+        idx = {k: i for i, k in enumerate(keys)}
+        tick = '✔'
+
+        def num(v):
+            if v is None or v == '':
+                return None
+            if isinstance(v, Decimal):
+                return float(v)
+            if isinstance(v, (int, float)):
+                return v
+            try:
+                return float(str(v))
+            except (ValueError, TypeError):
+                return None
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Collated BOM'
+        ws.append(labels)
+
+        for row in rows:
+            out = []
+            for k in keys:
+                if k in ('ordered', 'est_delivery'):
+                    out.append('')
+                    continue
+                v = row.get(k, '')
+                if isinstance(v, Decimal):
+                    v = float(v)
+                elif k == 'buildable' and v != '':
+                    v = str(v)
+                out.append(v)
+            ws.append(out)
+
+        # TOTAL row: money summed, lead time as the longest (critical path).
+        total = [''] * len(keys)
+        total[idx['part']] = 'TOTAL'
+        total[idx['line_total']] = float(grand_total) if grand_total else 0
+        leads = [num(r.get('lead_time')) for r in rows]
+        leads = [x for x in leads if x is not None]
+        if leads:
+            total[idx['lead_time']] = max(leads)
+        ws.append(total)
+
+        n = len(keys)
+        first, last = 2, 1 + len(rows)
+        total_row = ws.max_row
+
+        header_fill = PatternFill('solid', fgColor='1F2A37')
+        header_font = Font(bold=True, color='FFFFFF')
+        green_fill = PatternFill('solid', fgColor='C6EFCE')
+        green_font = Font(color='006100')
+        red_fill = PatternFill('solid', fgColor='FFC7CE')
+        red_font = Font(color='9C0006')
+        amber_fill = PatternFill('solid', fgColor='FFF2CC')
+        amber_font = Font(color='9C6500', italic=True)
+        ordered_fill = PatternFill('solid', fgColor='E8EAED')
+        ordered_font = Font(strike=True, color='6B7280')
+        top_border = Border(top=Side(style='thin', color='9AA0A6'))
+
+        for c in range(1, n + 1):
+            hc = ws.cell(row=1, column=c)
+            hc.fill = header_fill
+            hc.font = header_font
+            hc.alignment = Alignment(vertical='center', wrap_text=True)
+        ws.freeze_panes = 'B2'
+        ws.auto_filter.ref = f'A1:{get_column_letter(n)}1'
+
+        for key in ('unit_price', 'line_total'):
+            c = idx[key] + 1
+            for r in range(2, total_row + 1):
+                ws.cell(row=r, column=c).number_format = '$#,##0.00'
+
+        if rows:
+            # Enough In Stock: live conditional formatting (green Yes / red No).
+            col = get_column_letter(idx['buildable'] + 1)
+            rng = f'{col}{first}:{col}{last}'
+            ws.conditional_formatting.add(rng, CellIsRule(
+                operator='equal', formula=['"Yes"'], fill=green_fill, font=green_font))
+            ws.conditional_formatting.add(rng, CellIsRule(
+                operator='equal', formula=['"No"'], fill=red_fill, font=red_font))
+
+            # Ordered tick column + grey-out-when-ticked rule.
+            oc = get_column_letter(idx['ordered'] + 1)
+            dv = DataValidation(type='list', formula1=f'"{tick}"', allow_blank=True)
+            dv.promptTitle = 'Ordered?'
+            dv.prompt = 'Pick the tick to mark this line as ordered'
+            ws.add_data_validation(dv)
+            dv.add(f'{oc}{first}:{oc}{last}')
+            for r in range(first, last + 1):
+                ws.cell(row=r, column=idx['ordered'] + 1).alignment = Alignment(
+                    horizontal='center')
+            ws.conditional_formatting.add(
+                f'A{first}:{get_column_letter(n)}{last}',
+                FormulaRule(formula=[f'${oc}{first}="{tick}"'],
+                            fill=ordered_fill, font=ordered_font),
+            )
+
+            # Est. Delivery = today + lead time; amber where no lead time set.
+            lc = get_column_letter(idx['lead_time'] + 1)
+            dc_i = idx['est_delivery'] + 1
+            ws.cell(row=1, column=idx['lead_time'] + 1).comment = Comment(
+                self.LEAD_HELP, 'BOM Collator')
+            for r in range(first, last + 1):
+                lead_cell = ws.cell(row=r, column=idx['lead_time'] + 1)
+                dc = ws.cell(row=r, column=dc_i)
+                dc.value = (
+                    f'=IF(${lc}{r}="","Add lead time to the Part",TODAY()+${lc}{r})'
+                )
+                dc.number_format = 'dd/mm/yyyy'
+                dc.alignment = Alignment(horizontal='center')
+                if num(lead_cell.value) is None:
+                    lead_cell.fill = amber_fill
+                    dc.fill = amber_fill
+                    dc.font = amber_font
+
+            total_lead = ws.cell(row=total_row, column=idx['lead_time'] + 1)
+            if num(total_lead.value) is not None:
+                td = ws.cell(row=total_row, column=dc_i)
+                td.value = f'=TODAY()+${lc}{total_row}'
+                td.number_format = 'dd/mm/yyyy'
+                td.alignment = Alignment(horizontal='center')
+
+        for c in range(1, n + 1):
+            tc = ws.cell(row=total_row, column=c)
+            tc.font = Font(bold=True)
+            tc.border = top_border
+            if keys[c - 1] in ('unit_price', 'line_total'):
+                tc.number_format = '$#,##0.00'
+
+        for c, key in enumerate(keys, start=1):
+            if key == 'ordered':
+                ws.column_dimensions[get_column_letter(c)].width = 9
+                continue
+            longest = len(labels[c - 1])
+            for r in range(2, total_row + 1):
+                v = ws.cell(row=r, column=c).value
+                if v is not None and not str(v).startswith('='):
+                    longest = max(longest, len(str(v)))
+            cap = 45 if key == 'description' else 30
+            ws.column_dimensions[get_column_letter(c)].width = min(
+                max(longest + 2, 10), cap)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()

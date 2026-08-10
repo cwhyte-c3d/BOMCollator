@@ -93,6 +93,26 @@ It writes a `... (formatted).xlsx` alongside the input and:
   Lines and Reference), moves Description single-line to the far right, formats
   prices as currency, and rebuilds a bold TOTAL row that totals the money only.
 
+## One-click styled download (colours, checkboxes, everything)
+
+InvenTree's export dialog can only write plain data, so it can never add
+colours, the Ordered tick column or Est. Delivery. To get the fully formatted
+file straight from InvenTree in one step, the plugin serves its own download:
+
+```
+/plugin/collated-bom-exporter/download/<part_id>/
+```
+
+Open that for any assembly (the `part_id` is the number in the part's URL) and
+it downloads a ready-to-use `.xlsx` with everything applied: no IPN, Description
+on the right, green/red on Enough In Stock, the Ordered tick column, Est.
+Delivery from lead time, pack-rounded order quantities, and a TOTAL row with the
+grand cost and the longest lead time. No separate formatter step. It uses
+openpyxl, which InvenTree already ships (its own Excel export depends on it).
+
+The standalone `format_bom_excel.py` below still exists for formatting a plain
+export by hand, but the download above is the everyday path.
+
 ## Requirements
 
 - InvenTree 0.17.0 or newer. The data export plugin framework this relies on was
