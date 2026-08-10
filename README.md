@@ -31,7 +31,7 @@ Part, IPN, Description, BOM Level, Total Quantity Required, then:
 - Stock columns (when "Stock data" is ticked): Current Stock, Shortfall, Enough
   In Stock.
 - Pricing columns (when "Pricing" is ticked): Supplier, Supplier SKU, Pack Size,
-  Order Qty, Unit Price, Line Total.
+  Order Qty, Unit Price, Line Total, Lead Time (days).
 
 Followed by BOM Lines and Reference. With pricing on, a TOTAL row is added at the
 bottom.
@@ -48,6 +48,47 @@ bottom.
   the price and line total blank so you can spot the gap.
 - **Order Qty** is the shortfall (when stock is known) or the full requirement,
   rounded up to the pack size. The line total is Unit Price x Order Qty.
+
+## Lead time and estimated delivery
+
+InvenTree has no dedicated lead-time field on the Supplier Part in the current
+UI. The `lead_time` attribute exists on the model but is not wired to an input,
+so record the supplier delivery time (in days) in one of these spots and the
+exporter will pick it up automatically:
+
+1. **Supplier Part -> Notes**: type a tag like `lead_time: 14` (days). Easiest,
+   works in every version.
+2. **A Part parameter** named "Lead Time (days)". Cleaner if you prefer a proper
+   field.
+3. **Part / Supplier Part metadata** key `lead_time` (for automation via the
+   API).
+
+The exporter reads them in that order. The "Lead Time (days)" column carries the
+number through to the spreadsheet, and the Excel formatter (below) turns it into
+an "Est. Delivery" date so you can see when each line would land if ordered
+today. Parts with no lead time set are flagged so nobody forgets to add them.
+
+## Excel formatter (`format_bom_excel.py`)
+
+InvenTree exports plain data, so the presentation extras live in a small
+post-export script. Run it on any exported `.xlsx`:
+
+```bash
+python format_bom_excel.py "InvenTree_Collated_BOM_2026-08-10.xlsx"
+```
+
+It writes a `... (formatted).xlsx` alongside the input and:
+
+- adds an **Ordered** tick column (a dropdown, since Excel's own checkboxes
+  cannot be written by a script) that greys out and strikes through a row once
+  ticked,
+- colour-codes **Enough In Stock** green / red,
+- adds **Est. Delivery** = today + Lead Time (days) as a live formula,
+- **flags any part with no lead time in amber** and shows "Add lead time in
+  InvenTree" in the delivery cell, with a how-to note on the column header, and
+  prints a reminder in the console listing how many are missing,
+- drops IPN, moves Description to the far right, formats prices as currency, and
+  rebuilds a bold TOTAL row.
 
 ## Requirements
 

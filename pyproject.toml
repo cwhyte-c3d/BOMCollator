@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inventree-collated-bom-exporter"
-version = "0.2.0"
-description = "InvenTree BOM exporter that collates duplicate parts across sub-assemblies into one line each, with a stock check and pack-rounded order pricing."
+version = "0.3.0"
+description = "InvenTree BOM exporter that collates duplicate parts across sub-assemblies into one line each, with a stock check, pack-rounded order pricing and supplier lead times."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Contour3D" }]

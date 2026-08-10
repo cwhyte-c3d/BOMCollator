@@ -3,38 +3,52 @@
 InvenTree writes plain data, so the nice-to-haves live here. Run this on an
 exported .xlsx and it will:
 
+  - add an "Ordered" tick column you click to mark a line as ordered (the
+    whole row then greys out and strikes through),
   - drop the IPN column,
   - move Description to the far right so the numbers read first,
   - colour "Enough In Stock" green for Yes, red for No,
+  - add "Est. Delivery" = today + Lead Time (days) so you can see, at a glance,
+    when each line would land if ordered now,
   - format Unit Price and Line Total as currency,
   - rebuild a bold TOTAL row (total quantity, order qty and total cost),
   - bold the header, freeze it, add a filter, and size the columns.
 
+A note on the tick column: Excel's own click-checkboxes cannot be written by a
+script, so "Ordered" is a dropdown - click the cell, pick the tick. It behaves
+like a checkbox for filtering and the row greys out when ticked.
+
 Usage:
     python format_bom_excel.py "path/to/export.xlsx"
     python format_bom_excel.py "path/to/export.xlsx" "path/to/output.xlsx"
-
-If no output path is given, it writes "<name> (formatted).xlsx" alongside the
-input.
 """
 
 import sys
 from pathlib import Path
 
 import openpyxl
+from openpyxl.comments import Comment
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
-# --- Styling constants ------------------------------------------------------
-CURRENCY_FORMAT = "$#,##0.00"
+# --- Column names -----------------------------------------------------------
 DROP_COLUMNS = ["IPN"]
 DESCRIPTION_COLUMN = "Description"
 STOCK_FLAG_COLUMN = "Enough In Stock"
+LEAD_COLUMN = "Lead Time (days)"
+DELIVERY_COLUMN = "Est. Delivery (if ordered today)"
+ORDERED_COLUMN = "Ordered"
 CURRENCY_COLUMNS = ["Unit Price", "Line Total"]
-# Columns to sum on the TOTAL row.
 SUM_COLUMNS = ["Total Quantity Required", "Order Qty", "Line Total"]
 TOTAL_LABEL = "TOTAL"
+TICK = "✔"  # heavy check mark
+
+# --- Styling ----------------------------------------------------------------
+CURRENCY_FORMAT = "$#,##0.00"
+DATE_FORMAT = "dd/mm/yyyy"
 
 HEADER_FILL = PatternFill("solid", fgColor="1F2A37")   # dark slate
 HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -42,11 +56,25 @@ GREEN_FILL = PatternFill("solid", fgColor="C6EFCE")
 GREEN_FONT = Font(color="006100")
 RED_FILL = PatternFill("solid", fgColor="FFC7CE")
 RED_FONT = Font(color="9C0006")
+ORDERED_FILL = PatternFill("solid", fgColor="E8EAED")   # light grey
+ORDERED_FONT = Font(strike=True, color="6B7280")
+MISSING_FILL = PatternFill("solid", fgColor="FFF2CC")   # amber
+MISSING_FONT = Font(color="9C6500", italic=True)
 TOTAL_FONT = Font(bold=True)
 TOP_BORDER = Border(top=Side(style="thin", color="9AA0A6"))
 
 YES_VALUES = {"yes", "y", "true", "1"}
 NO_VALUES = {"no", "n", "false", "0"}
+
+MISSING_LEAD_TEXT = "Add lead time in InvenTree"
+LEAD_HOWTO = (
+    "Lead time is the supplier delivery time in days.\n"
+    "There is no dedicated field on the Supplier Part, so record it one of "
+    "these ways and the exporter will pick it up:\n"
+    "  1. Supplier Part > Notes: type  lead_time: 14  (days)\n"
+    "  2. A Part parameter named 'Lead Time (days)'\n"
+    "Rows highlighted amber have no lead time set yet."
+)
 
 
 def _to_number(value):
@@ -76,12 +104,17 @@ def format_workbook(input_path: Path, output_path: Path) -> None:
     if data and str(data[-1][0]).strip().upper() == TOTAL_LABEL:
         data.pop()
 
-    # Work out the new column order: drop unwanted columns, push Description
-    # to the far right.
+    # New column order: Ordered first, drop unwanted columns, Est. Delivery
+    # after Lead Time, Description last. Lead Time and Est. Delivery are always
+    # present, even if the export predates them, so the "add it" reminder shows.
     kept = [h for h in header if h not in DROP_COLUMNS]
+    if LEAD_COLUMN not in kept:
+        kept.append(LEAD_COLUMN)
     if DESCRIPTION_COLUMN in kept:
         kept.remove(DESCRIPTION_COLUMN)
         kept.append(DESCRIPTION_COLUMN)
+    kept.insert(kept.index(LEAD_COLUMN) + 1, DELIVERY_COLUMN)
+    kept.insert(0, ORDERED_COLUMN)
 
     src_index = {name: i for i, name in enumerate(header)}
 
@@ -89,15 +122,15 @@ def format_workbook(input_path: Path, output_path: Path) -> None:
         i = src_index.get(name)
         return row[i] if i is not None and i < len(row) else None
 
-    # Build a fresh sheet in the new order.
     out = openpyxl.Workbook()
     sheet = out.active
     sheet.title = "Collated BOM"
-
     sheet.append(kept)
 
+    # Added columns (Ordered, Est. Delivery) have no source data.
     for row in data:
-        sheet.append([cell(row, name) for name in kept])
+        sheet.append(["" if name in (ORDERED_COLUMN, DELIVERY_COLUMN)
+                      else cell(row, name) for name in kept])
 
     # TOTAL row.
     totals = {}
@@ -108,35 +141,33 @@ def format_workbook(input_path: Path, output_path: Path) -> None:
             )
             totals[name] = total
 
-    total_row = []
-    for i, name in enumerate(kept):
-        if i == 0:
-            total_row.append(TOTAL_LABEL)
-        elif name in totals:
-            total_row.append(round(totals[name], 4))
-        else:
-            total_row.append(None)
+    total_row = [round(totals[name], 4) if name in totals else None for name in kept]
+    # Put the TOTAL label in the Part column (or the first column as a fallback).
+    label_col = kept.index("Part") if "Part" in kept else 0
+    total_row[label_col] = TOTAL_LABEL
     sheet.append(total_row)
 
-    _apply_styles(sheet, kept)
+    missing = _apply_styles(sheet, kept, data_rows=len(data))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out.save(output_path)
+    return missing
 
 
-def _apply_styles(sheet, header) -> None:
+def _apply_styles(sheet, header, data_rows) -> int:
     col_index = {name: i + 1 for i, name in enumerate(header)}
     last_row = sheet.max_row
+    first_data, last_data = 2, 1 + data_rows       # data rows only
     total_row_idx = last_row
 
-    # Header styling.
+    # Header.
     for c in range(1, len(header) + 1):
         hc = sheet.cell(row=1, column=c)
         hc.fill = HEADER_FILL
         hc.font = HEADER_FONT
-        hc.alignment = Alignment(vertical="center")
+        hc.alignment = Alignment(vertical="center", wrap_text=True)
 
-    sheet.freeze_panes = "A2"
+    sheet.freeze_panes = "B2"
     sheet.auto_filter.ref = f"A1:{get_column_letter(len(header))}1"
 
     # Currency columns.
@@ -147,10 +178,10 @@ def _apply_styles(sheet, header) -> None:
         for r in range(2, last_row + 1):
             sheet.cell(row=r, column=c).number_format = CURRENCY_FORMAT
 
-    # Colour the stock flag (data rows only, not the TOTAL row).
+    # Colour the stock flag on data rows.
     flag_c = col_index.get(STOCK_FLAG_COLUMN)
-    if flag_c:
-        for r in range(2, total_row_idx):
+    if flag_c and data_rows:
+        for r in range(first_data, last_data + 1):
             cellv = sheet.cell(row=r, column=flag_c)
             token = str(cellv.value).strip().lower() if cellv.value is not None else ""
             if token in YES_VALUES:
@@ -158,7 +189,60 @@ def _apply_styles(sheet, header) -> None:
             elif token in NO_VALUES:
                 cellv.fill, cellv.font = RED_FILL, RED_FONT
 
-    # TOTAL row styling.
+    # Ordered tick column: a dropdown per data row.
+    ordered_c = col_index.get(ORDERED_COLUMN)
+    if ordered_c and data_rows:
+        col = get_column_letter(ordered_c)
+        dv = DataValidation(type="list", formula1=f'"{TICK}"', allow_blank=True)
+        dv.prompt = "Pick the tick to mark this line as ordered"
+        dv.promptTitle = "Ordered?"
+        sheet.add_data_validation(dv)
+        dv.add(f"{col}{first_data}:{col}{last_data}")
+        for r in range(first_data, last_data + 1):
+            sheet.cell(row=r, column=ordered_c).alignment = Alignment(
+                horizontal="center"
+            )
+
+        # When ticked, grey out and strike through the whole row.
+        row_range = f"A{first_data}:{get_column_letter(len(header))}{last_data}"
+        rule = FormulaRule(
+            formula=[f'${col}{first_data}="{TICK}"'],
+            fill=ORDERED_FILL,
+            font=ORDERED_FONT,
+        )
+        sheet.conditional_formatting.add(row_range, rule)
+
+    # Est. Delivery = today + lead time, as a live formula. Where lead time is
+    # missing, the cell shows a reminder and the lead-time cell is flagged amber.
+    lead_c = col_index.get(LEAD_COLUMN)
+    delivery_c = col_index.get(DELIVERY_COLUMN)
+    missing = 0
+    if lead_c and delivery_c and data_rows:
+        lead_col = get_column_letter(lead_c)
+
+        # How-to note on both headers so it is easy to find.
+        note = Comment(LEAD_HOWTO, "BOM Collator")
+        note.width, note.height = 340, 150
+        sheet.cell(row=1, column=lead_c).comment = note
+        sheet.cell(row=1, column=delivery_c).comment = Comment(LEAD_HOWTO, "BOM Collator")
+
+        for r in range(first_data, last_data + 1):
+            lead_cell = sheet.cell(row=r, column=lead_c)
+            dc = sheet.cell(row=r, column=delivery_c)
+            dc.value = (
+                f'=IF(${lead_col}{r}="","{MISSING_LEAD_TEXT}",TODAY()+${lead_col}{r})'
+            )
+            dc.number_format = DATE_FORMAT
+            dc.alignment = Alignment(horizontal="center")
+
+            has_lead = _to_number(lead_cell.value) is not None
+            if not has_lead:
+                missing += 1
+                lead_cell.fill = MISSING_FILL
+                dc.fill = MISSING_FILL
+                dc.font = MISSING_FONT
+
+    # TOTAL row.
     for c in range(1, len(header) + 1):
         tc = sheet.cell(row=total_row_idx, column=c)
         tc.font = TOTAL_FONT
@@ -166,18 +250,25 @@ def _apply_styles(sheet, header) -> None:
         if header[c - 1] in CURRENCY_COLUMNS:
             tc.number_format = CURRENCY_FORMAT
 
-    # Column widths, capped so long descriptions do not blow out the sheet.
+    # Column widths.
     for c, name in enumerate(header, start=1):
+        if name == ORDERED_COLUMN:
+            sheet.column_dimensions[get_column_letter(c)].width = 9
+            continue
         longest = len(str(name))
         for r in range(2, last_row + 1):
             val = sheet.cell(row=r, column=c).value
-            if val is not None:
+            if val is not None and not str(val).startswith("="):
                 longest = max(longest, len(str(val)))
-        width = min(max(longest + 2, 10), 60)
+        width = min(max(longest + 2, 10), 55)
         sheet.column_dimensions[get_column_letter(c)].width = width
         if name == DESCRIPTION_COLUMN:
             for r in range(2, last_row + 1):
-                sheet.cell(row=r, column=c).alignment = Alignment(wrap_text=True, vertical="top")
+                sheet.cell(row=r, column=c).alignment = Alignment(
+                    wrap_text=True, vertical="top"
+                )
+
+    return missing
 
 
 def main() -> None:
@@ -193,8 +284,15 @@ def main() -> None:
     else:
         output_path = input_path.with_name(f"{input_path.stem} (formatted).xlsx")
 
-    format_workbook(input_path, output_path)
+    missing = format_workbook(input_path, output_path)
     print(f"Written: {output_path}")
+    if missing:
+        print(
+            f"Reminder: {missing} part(s) have no lead time set. "
+            "Add it in InvenTree (Supplier Part Notes: 'lead_time: 14', or a "
+            "'Lead Time (days)' part parameter). The amber cells in the sheet "
+            "show which ones."
+        )
 
 
 if __name__ == "__main__":
