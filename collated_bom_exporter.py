@@ -31,6 +31,18 @@ from part.serializers import BomItemSerializer
 from plugin import InvenTreePlugin
 from plugin.mixins import DataExportMixin, UrlsMixin
 
+try:
+    # UserInterfaceMixin adds the part-page panel/button. Available on newer
+    # InvenTree; guarded so the plugin still loads if it is absent. The
+    # fallback is an EMPTY class (never `object`) to keep a valid MRO.
+    from plugin.mixins import UserInterfaceMixin
+    _HAS_UI_MIXIN = True
+except Exception:  # pragma: no cover
+    class UserInterfaceMixin:  # type: ignore
+        """No-op fallback when this InvenTree has no UI mixin."""
+
+    _HAS_UI_MIXIN = False
+
 
 ZERO = Decimal(0)
 ONE = Decimal(1)
@@ -110,7 +122,9 @@ class CollatedBomOptionsSerializer(serializers.Serializer):
     )
 
 
-class CollatedBomExporterPlugin(DataExportMixin, UrlsMixin, InvenTreePlugin):
+class CollatedBomExporterPlugin(
+    DataExportMixin, UrlsMixin, UserInterfaceMixin, InvenTreePlugin
+):
     """Export a BOM with identical parts collated into one line each."""
 
     NAME = 'Collated BOM Exporter'
@@ -121,7 +135,7 @@ class CollatedBomExporterPlugin(DataExportMixin, UrlsMixin, InvenTreePlugin):
         'a single line each, with true total quantities, a stock check and '
         'pack-rounded order pricing.'
     )
-    VERSION = '0.4.0'
+    VERSION = '0.4.1'
     AUTHOR = _('Contour3D')
 
     ExportOptionsSerializer = CollatedBomOptionsSerializer
@@ -613,7 +627,83 @@ class CollatedBomExporterPlugin(DataExportMixin, UrlsMixin, InvenTreePlugin):
         return [
             path('download/<int:pk>/', self.download_formatted_bom,
                  name='collated-bom-download'),
+            path('panel.js', self.serve_panel_js, name='collated-bom-panel-js'),
         ]
+
+    # ---- Part-page button (custom UI panel) --------------------------------
+
+    def get_ui_panels(self, request, context, **kwargs):
+        """Add a 'Collated BOM' panel with a download button to Part pages.
+
+        Only shows for assemblies (parts that have a BOM).
+        """
+        target = context.get('target_model') or context.get('model')
+        if target != 'part':
+            return []
+
+        pk = context.get('target_id') or context.get('pk') or context.get('id')
+        if pk is None:
+            return []
+
+        # Only show for assemblies.
+        try:
+            part = Part.objects.get(pk=pk)
+            if not getattr(part, 'assembly', False):
+                return []
+        except Exception:
+            pass
+
+        return [
+            {
+                'key': 'collated-bom',
+                'title': _('Collated BOM'),
+                'label': _('Collated BOM'),
+                'icon': 'ti:file-spreadsheet:outline',
+                'source': self.plugin_static_file('panel.js')
+                if hasattr(self, 'plugin_static_file')
+                else f'/plugin/{self.SLUG}/panel.js',
+                'context': {
+                    'download_url': f'/plugin/{self.SLUG}/download/{pk}/',
+                },
+            }
+        ]
+
+    def serve_panel_js(self, request):
+        """Serve the small JS module that renders the download button."""
+        from django.http import HttpResponse
+
+        js = """
+export function renderPanel(target, context) {
+    const el = (target && target.ref) ? target.ref : target;
+    let pk = '';
+    if (context) {
+        pk = context.id || context.pk || context.target_id ||
+             (context.instance && context.instance.pk) || '';
+        if (context.context && context.context.download_url) {
+            renderLink(el, context.context.download_url);
+            return;
+        }
+    }
+    renderLink(el, '/plugin/collated-bom-exporter/download/' + pk + '/');
+}
+
+function renderLink(el, url) {
+    if (!el) { return; }
+    el.innerHTML =
+        '<div style="padding:1rem;">' +
+        '<a href="' + url + '" ' +
+        'style="display:inline-block;padding:10px 18px;background:#1F2A37;' +
+        'color:#fff;border-radius:6px;text-decoration:none;font-weight:600;">' +
+        'Download collated BOM (Excel)</a>' +
+        '<p style="margin-top:10px;color:#6b7280;font-size:0.9em;">' +
+        'Flat, collated parts with colours, order quantities, lead time and ' +
+        'totals. Nothing else to do - just open the file.</p>' +
+        '</div>';
+}
+
+export default renderPanel;
+"""
+        return HttpResponse(js, content_type='application/javascript')
 
     def download_formatted_bom(self, request, pk):
         """Build and return the fully styled collated BOM for a part."""
