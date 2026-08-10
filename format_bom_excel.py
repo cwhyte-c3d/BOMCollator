@@ -28,7 +28,7 @@ from pathlib import Path
 
 import openpyxl
 from openpyxl.comments import Comment
-from openpyxl.formatting.rule import FormulaRule
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -191,16 +191,22 @@ def _apply_styles(sheet, header, data_rows) -> int:
         for r in range(2, last_row + 1):
             sheet.cell(row=r, column=c).number_format = CURRENCY_FORMAT
 
-    # Colour the stock flag on data rows.
+    # Conditional formatting on the stock flag: a live Excel rule, so the cell
+    # recolours itself if the value is edited. Green for Yes, red for No.
     flag_c = col_index.get(STOCK_FLAG_COLUMN)
     if flag_c and data_rows:
-        for r in range(first_data, last_data + 1):
-            cellv = sheet.cell(row=r, column=flag_c)
-            token = str(cellv.value).strip().lower() if cellv.value is not None else ""
-            if token in YES_VALUES:
-                cellv.fill, cellv.font = GREEN_FILL, GREEN_FONT
-            elif token in NO_VALUES:
-                cellv.fill, cellv.font = RED_FILL, RED_FONT
+        col = get_column_letter(flag_c)
+        rng = f"{col}{first_data}:{col}{last_data}"
+        sheet.conditional_formatting.add(
+            rng,
+            CellIsRule(operator="equal", formula=['"Yes"'],
+                       fill=GREEN_FILL, font=GREEN_FONT),
+        )
+        sheet.conditional_formatting.add(
+            rng,
+            CellIsRule(operator="equal", formula=['"No"'],
+                       fill=RED_FILL, font=RED_FONT),
+        )
 
     # Ordered tick column: a dropdown per data row.
     ordered_c = col_index.get(ORDERED_COLUMN)
