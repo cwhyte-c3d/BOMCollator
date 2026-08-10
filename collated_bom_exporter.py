@@ -735,8 +735,17 @@ class CollatedBomExporterPlugin(DataExportMixin, UrlsMixin, InvenTreePlugin):
                 ws.cell(row=r, column=c).number_format = '$#,##0.00'
 
         if rows:
-            # Enough In Stock: live conditional formatting (green Yes / red No).
-            col = get_column_letter(idx['buildable'] + 1)
+            # Enough In Stock: solid fills (always visible), plus a live rule
+            # so edits recolour too. Green = Yes, red = No.
+            bcol = idx['buildable'] + 1
+            for r in range(first, last + 1):
+                cellv = ws.cell(row=r, column=bcol)
+                token = str(cellv.value).strip().lower() if cellv.value not in (None, '') else ''
+                if token == 'yes':
+                    cellv.fill, cellv.font = green_fill, green_font
+                elif token == 'no':
+                    cellv.fill, cellv.font = red_fill, red_font
+            col = get_column_letter(bcol)
             rng = f'{col}{first}:{col}{last}'
             ws.conditional_formatting.add(rng, CellIsRule(
                 operator='equal', formula=['"Yes"'], fill=green_fill, font=green_font))

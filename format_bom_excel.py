@@ -210,22 +210,26 @@ def _apply_styles(sheet, header, data_rows) -> int:
         for r in range(2, last_row + 1):
             sheet.cell(row=r, column=c).number_format = CURRENCY_FORMAT
 
-    # Conditional formatting on the stock flag: a live Excel rule, so the cell
-    # recolours itself if the value is edited. Green for Yes, red for No.
+    # Colour the stock flag with solid fills (always visible, unlike
+    # conditional formatting which some viewers do not render). Green = Yes,
+    # red = No. Also add a live rule as a bonus so edits recolour too.
     flag_c = col_index.get(STOCK_FLAG_COLUMN)
     if flag_c and data_rows:
         col = get_column_letter(flag_c)
         rng = f"{col}{first_data}:{col}{last_data}"
+        for r in range(first_data, last_data + 1):
+            cellv = sheet.cell(row=r, column=flag_c)
+            token = str(cellv.value).strip().lower() if cellv.value is not None else ""
+            if token in YES_VALUES:
+                cellv.fill, cellv.font = GREEN_FILL, GREEN_FONT
+            elif token in NO_VALUES:
+                cellv.fill, cellv.font = RED_FILL, RED_FONT
         sheet.conditional_formatting.add(
-            rng,
-            CellIsRule(operator="equal", formula=['"Yes"'],
-                       fill=GREEN_FILL, font=GREEN_FONT),
-        )
+            rng, CellIsRule(operator="equal", formula=['"Yes"'],
+                            fill=GREEN_FILL, font=GREEN_FONT))
         sheet.conditional_formatting.add(
-            rng,
-            CellIsRule(operator="equal", formula=['"No"'],
-                       fill=RED_FILL, font=RED_FONT),
-        )
+            rng, CellIsRule(operator="equal", formula=['"No"'],
+                            fill=RED_FILL, font=RED_FONT))
 
     # Ordered tick column: a dropdown per data row.
     ordered_c = col_index.get(ORDERED_COLUMN)
