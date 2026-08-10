@@ -120,7 +120,7 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
         'a single line each, with true total quantities, a stock check and '
         'pack-rounded order pricing.'
     )
-    VERSION = '0.3.0'
+    VERSION = '0.3.1'
     AUTHOR = _('Contour3D')
 
     ExportOptionsSerializer = CollatedBomOptionsSerializer
@@ -538,11 +538,13 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
         return ONE
 
     def update_headers(self, headers, context, **kwargs):
-        """Replace the default columns with the collated column set."""
+        """Replace the default columns with the collated column set.
+
+        IPN is dropped (not needed) and Description is placed on the far right
+        so the quantities and pricing read first.
+        """
         columns: "OrderedDict[str, str]" = OrderedDict()
         columns['part'] = _('Part')
-        columns['ipn'] = _('IPN')
-        columns['description'] = _('Description')
         columns['bom_level'] = _('BOM Level')
         columns['total_quantity'] = _('Total Quantity Required')
 
@@ -562,4 +564,5 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
 
         columns['occurrences'] = _('BOM Lines')
         columns['reference'] = _('Reference')
+        columns['description'] = _('Description')
         return columns
