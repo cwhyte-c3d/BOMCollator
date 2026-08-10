@@ -35,7 +35,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 
 # --- Column names -----------------------------------------------------------
-DROP_COLUMNS = ["IPN"]
+DROP_COLUMNS = ["IPN", "Supplier SKU", "Pack Size", "BOM Lines", "Reference"]
 DESCRIPTION_COLUMN = "Description"
 STOCK_FLAG_COLUMN = "Enough In Stock"
 LEAD_COLUMN = "Lead Time (days)"
@@ -273,13 +273,11 @@ def _apply_styles(sheet, header, data_rows) -> int:
             val = sheet.cell(row=r, column=c).value
             if val is not None and not str(val).startswith("="):
                 longest = max(longest, len(str(val)))
-        width = min(max(longest + 2, 10), 55)
+        # Description stays single-line (no wrap) so rows stay short; cap its
+        # width tighter since it is the long free-text column.
+        cap = 45 if name == DESCRIPTION_COLUMN else 30
+        width = min(max(longest + 2, 10), cap)
         sheet.column_dimensions[get_column_letter(c)].width = width
-        if name == DESCRIPTION_COLUMN:
-            for r in range(2, last_row + 1):
-                sheet.cell(row=r, column=c).alignment = Alignment(
-                    wrap_text=True, vertical="top"
-                )
 
     return missing
 

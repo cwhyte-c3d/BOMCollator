@@ -89,8 +89,9 @@ It writes a `... (formatted).xlsx` alongside the input and:
 - **flags any part with no lead time in amber** and shows "Add lead time to the
   Part" in the delivery cell, with a how-to note on the column header, and
   prints a reminder in the console listing how many are missing,
-- drops IPN, moves Description to the far right, formats prices as currency, and
-  rebuilds a bold TOTAL row.
+- slims to the columns that matter (drops IPN, Supplier SKU, Pack Size, BOM
+  Lines and Reference), moves Description single-line to the far right, formats
+  prices as currency, and rebuilds a bold TOTAL row that totals the money only.
 
 ## Requirements
 
