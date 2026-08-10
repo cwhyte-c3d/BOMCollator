@@ -66,14 +66,14 @@ TOP_BORDER = Border(top=Side(style="thin", color="9AA0A6"))
 YES_VALUES = {"yes", "y", "true", "1"}
 NO_VALUES = {"no", "n", "false", "0"}
 
-MISSING_LEAD_TEXT = "Add lead time in InvenTree"
+MISSING_LEAD_TEXT = "Add lead time to the Part"
 LEAD_HOWTO = (
-    "Lead time is the supplier delivery time in days.\n"
-    "There is no dedicated field on the Supplier Part, so record it one of "
-    "these ways and the exporter will pick it up:\n"
-    "  1. Supplier Part > Notes: type  lead_time: 14  (days)\n"
-    "  2. A Part parameter named 'Lead Time (days)'\n"
-    "Rows highlighted amber have no lead time set yet."
+    "Lead time is how long the item takes to get, in days.\n"
+    "It is recorded on the PART (different items take different times), so add "
+    "it one of these ways and the exporter will pick it up:\n"
+    "  1. Part > Parameters: add 'Lead Time (days)' with the number of days\n"
+    "  2. Part > Notes: type  lead_time: 14  (days)\n"
+    "Not every part will have one. Rows highlighted amber have none set yet."
 )
 
 

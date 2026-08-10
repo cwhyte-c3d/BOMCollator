@@ -311,7 +311,9 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
                 row['_supplier'] = info['supplier']
                 row['_sku'] = info['sku']
                 row['_pack'] = info['pack']
-                row['_lead_time'] = info['lead_time']
+                # Lead time lives on the part (how long the item takes), so read
+                # it from the part regardless of whether a supplier is set.
+                row['_lead_time'] = self._lead_time(part, info['supplier_part'])
 
         self.collated[key] = row
 
@@ -331,12 +333,13 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
 
     @staticmethod
     def _supplier_info(part):
-        """Cheapest supplier's name, SKU, pack size and lead time for a part.
+        """Cheapest supplier's name, SKU and pack size for a part.
 
         Returns sensible blanks when no supplier is recorded, so the export
-        never fails on an incompletely set up part.
+        never fails on an incompletely set up part. 'supplier_part' is the
+        chosen SupplierPart (or None) for the lead-time lookup.
         """
-        blank = {'supplier': '', 'sku': '', 'pack': ONE, 'lead_time': None}
+        blank = {'supplier': '', 'sku': '', 'pack': ONE, 'supplier_part': None}
 
         try:
             supplier_parts = list(part.supplier_parts.all())
@@ -365,51 +368,76 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
             'supplier': getattr(supplier, 'name', '') or '',
             'sku': getattr(best, 'SKU', '') or '',
             'pack': CollatedBomExporterPlugin._pack_size(best),
-            'lead_time': CollatedBomExporterPlugin._lead_time(part, best),
+            'supplier_part': best,
         }
 
     @staticmethod
-    def _lead_time(part, supplier_part):
-        """Lead time in days for a supplier part, from wherever it is recorded.
+    def _lead_time(part, supplier_part=None):
+        """Lead time in days for a part, from wherever it is recorded.
 
-        Checks, in order:
-          1. the native SupplierPart.lead_time attribute (days or a duration),
-          2. SupplierPart.metadata (key 'lead_time' / 'lead_time_days'),
-          3. a tag in the SupplierPart note, e.g. "lead_time: 14" or "lead 14",
-          4. a Part parameter named "Lead Time" / "Lead Time (days)".
+        Lead time is treated as a property of the PART (how long that item
+        takes to get), so the part is checked first and works even when the
+        part has no supplier. Checks, in order:
+          1. a Part parameter named "Lead Time" / "Lead Time (days)",
+          2. Part.metadata (key 'lead_time' / 'lead_time_days'),
+          3. a "lead_time: 14" tag in the part's notes,
+          4. the native SupplierPart.lead_time attribute (days or a duration),
+          5. SupplierPart.metadata,
+          6. a "lead_time: 14" tag in the supplier part note.
 
-        Returns a whole number of days, or None if nothing is recorded. This
-        lets the workshop enter lead time in whichever spot suits their setup.
+        Returns a whole number of days, or None if nothing is recorded.
         """
-        # 1. Native model attribute (exists but often blank / no UI).
-        raw = getattr(supplier_part, 'lead_time', None)
-        days = getattr(raw, 'days', None)  # timedelta support
-        value = _dec(days, default=None) if days is not None else _dec(raw, default=None) if raw not in (None, '') else None
-        if value is not None and value > ZERO:
-            return value
-
-        # 2. Supplier part metadata (settable via API / other plugins).
-        try:
-            meta = supplier_part.metadata or {}
-            for key in ('lead_time', 'lead_time_days', 'leadTime'):
-                if key in meta:
-                    value = _dec(meta[key], default=None)
-                    if value is not None and value > ZERO:
-                        return value
-        except Exception:
-            pass
-
-        # 3. A tag typed into the supplier part note field.
-        note = getattr(supplier_part, 'note', None) or getattr(supplier_part, 'notes', None) or ''
-        value = CollatedBomExporterPlugin._parse_lead_tag(str(note))
-        if value is not None:
-            return value
-
-        # 4. A Part parameter.
+        # 1. Part parameter (where Charlotte records it).
         value = CollatedBomExporterPlugin._part_parameter_days(part)
         if value is not None:
             return value
 
+        # 2. Part metadata.
+        value = CollatedBomExporterPlugin._metadata_days(part)
+        if value is not None:
+            return value
+
+        # 3. A tag in the part notes.
+        note = getattr(part, 'notes', None) or getattr(part, 'note', None) or ''
+        value = CollatedBomExporterPlugin._parse_lead_tag(str(note))
+        if value is not None:
+            return value
+
+        if supplier_part is None:
+            return None
+
+        # 4. Native SupplierPart attribute (exists but usually no UI).
+        raw = getattr(supplier_part, 'lead_time', None)
+        days = getattr(raw, 'days', None)  # timedelta support
+        value = (
+            _dec(days, default=None) if days is not None
+            else _dec(raw, default=None) if raw not in (None, '')
+            else None
+        )
+        if value is not None and value > ZERO:
+            return value
+
+        # 5. Supplier part metadata.
+        value = CollatedBomExporterPlugin._metadata_days(supplier_part)
+        if value is not None:
+            return value
+
+        # 6. A tag in the supplier part note.
+        note = getattr(supplier_part, 'note', None) or getattr(supplier_part, 'notes', None) or ''
+        return CollatedBomExporterPlugin._parse_lead_tag(str(note))
+
+    @staticmethod
+    def _metadata_days(obj):
+        """Read a lead-time value from a model's metadata dict, if present."""
+        try:
+            meta = obj.metadata or {}
+        except Exception:
+            return None
+        for key in ('lead_time', 'lead_time_days', 'leadTime'):
+            if key in meta:
+                value = _dec(meta[key], default=None)
+                if value is not None and value > ZERO:
+                    return value
         return None
 
     @staticmethod
@@ -430,7 +458,12 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
 
     @staticmethod
     def _part_parameter_days(part):
-        """Read a 'Lead Time' part parameter, if one is set."""
+        """Read a 'Lead Time' part parameter, if one is set.
+
+        Matches any parameter whose name contains both 'lead' and 'time', and
+        copes with values stored as a plain number, a numeric field, or text
+        like '21 days'.
+        """
         try:
             params = part.get_parameters()
         except Exception:
@@ -443,10 +476,25 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
             template = getattr(param, 'template', None)
             name = str(getattr(template, 'name', '') or '').lower()
             if 'lead' in name and 'time' in name:
-                value = _dec(getattr(param, 'data', None), default=None)
+                # Prefer InvenTree's parsed numeric value when available.
+                value = _dec(getattr(param, 'data_numeric', None), default=None)
+                if value is None:
+                    value = CollatedBomExporterPlugin._first_number(
+                        getattr(param, 'data', None)
+                    )
                 if value is not None and value > ZERO:
                     return value
         return None
+
+    @staticmethod
+    def _first_number(value):
+        """Pull the first number out of a value like '21' or '21 days'."""
+        if value is None:
+            return None
+        import re
+
+        match = re.search(r'\d+(?:\.\d+)?', str(value))
+        return _dec(match.group(0), default=None) if match else None
 
     @staticmethod
     def _cheapest_price(supplier_part):

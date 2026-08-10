@@ -51,22 +51,24 @@ bottom.
 
 ## Lead time and estimated delivery
 
-InvenTree has no dedicated lead-time field on the Supplier Part in the current
-UI. The `lead_time` attribute exists on the model but is not wired to an input,
-so record the supplier delivery time (in days) in one of these spots and the
-exporter will pick it up automatically:
+Lead time is how long an item takes to get, in days. It is recorded on the
+**Part** (different items take different times, regardless of supplier), so add
+it one of these ways and the exporter picks it up automatically:
 
-1. **Supplier Part -> Notes**: type a tag like `lead_time: 14` (days). Easiest,
-   works in every version.
-2. **A Part parameter** named "Lead Time (days)". Cleaner if you prefer a proper
-   field.
-3. **Part / Supplier Part metadata** key `lead_time` (for automation via the
-   API).
+1. **Part -> Parameters**: add a parameter named "Lead Time (days)" with the
+   number of days. This is the recommended spot.
+2. **Part -> Notes**: type a tag like `lead_time: 14` (days).
+3. **Part metadata** key `lead_time` (for automation via the API).
 
-The exporter reads them in that order. The "Lead Time (days)" column carries the
-number through to the spreadsheet, and the Excel formatter (below) turns it into
-an "Est. Delivery" date so you can see when each line would land if ordered
-today. Parts with no lead time set are flagged so nobody forgets to add them.
+As a fallback the exporter will also read the same things off the Supplier Part
+(native `lead_time` field, metadata, or a `lead_time:` note tag) if the part
+itself has nothing set.
+
+Not every part will have a lead time, and that is fine. The "Lead Time (days)"
+column carries the number through to the spreadsheet, and the Excel formatter
+(below) turns it into an "Est. Delivery" date so you can see when each line
+would land if ordered today. Parts with no lead time are flagged amber so nobody
+forgets to add them.
 
 ## Excel formatter (`format_bom_excel.py`)
 
@@ -84,8 +86,8 @@ It writes a `... (formatted).xlsx` alongside the input and:
   ticked,
 - colour-codes **Enough In Stock** green / red,
 - adds **Est. Delivery** = today + Lead Time (days) as a live formula,
-- **flags any part with no lead time in amber** and shows "Add lead time in
-  InvenTree" in the delivery cell, with a how-to note on the column header, and
+- **flags any part with no lead time in amber** and shows "Add lead time to the
+  Part" in the delivery cell, with a how-to note on the column header, and
   prints a reminder in the console listing how many are missing,
 - drops IPN, moves Description to the far right, formats prices as currency, and
   rebuilds a bold TOTAL row.
