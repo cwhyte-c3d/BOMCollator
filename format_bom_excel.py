@@ -231,24 +231,27 @@ def _apply_styles(sheet, header, data_rows) -> int:
             rng, CellIsRule(operator="equal", formula=['"No"'],
                             fill=RED_FILL, font=RED_FONT))
 
-    # Ordered tick column: a dropdown per data row.
+    # Ordered checkbox: empty box by default, pick the ticked box to mark it
+    # ordered. Row greys out when ticked.
     ordered_c = col_index.get(ORDERED_COLUMN)
     if ordered_c and data_rows:
+        unticked, ticked = "☐", "☑"
         col = get_column_letter(ordered_c)
-        dv = DataValidation(type="list", formula1=f'"{TICK}"', allow_blank=True)
-        dv.prompt = "Pick the tick to mark this line as ordered"
+        dv = DataValidation(
+            type="list", formula1=f'"{unticked},{ticked}"', allow_blank=True)
+        dv.prompt = "Tick the box to mark this line as ordered"
         dv.promptTitle = "Ordered?"
         sheet.add_data_validation(dv)
         dv.add(f"{col}{first_data}:{col}{last_data}")
         for r in range(first_data, last_data + 1):
-            sheet.cell(row=r, column=ordered_c).alignment = Alignment(
-                horizontal="center"
-            )
+            c = sheet.cell(row=r, column=ordered_c)
+            c.value = unticked
+            c.alignment = Alignment(horizontal="center")
 
         # When ticked, grey out and strike through the whole row.
         row_range = f"A{first_data}:{get_column_letter(len(header))}{last_data}"
         rule = FormulaRule(
-            formula=[f'${col}{first_data}="{TICK}"'],
+            formula=[f'${col}{first_data}="{ticked}"'],
             fill=ORDERED_FILL,
             font=ORDERED_FONT,
         )

@@ -135,7 +135,7 @@ class CollatedBomExporterPlugin(
         'a single line each, with true total quantities, a stock check and '
         'pack-rounded order pricing.'
     )
-    VERSION = '0.4.2'
+    VERSION = '0.4.3'
     AUTHOR = _('Contour3D')
 
     ExportOptionsSerializer = CollatedBomOptionsSerializer
@@ -858,19 +858,24 @@ export default renderPanel;
             ws.conditional_formatting.add(rng, CellIsRule(
                 operator='equal', formula=['"No"'], fill=red_fill, font=red_font))
 
-            # Ordered tick column + grey-out-when-ticked rule.
-            oc = get_column_letter(idx['ordered'] + 1)
-            dv = DataValidation(type='list', formula1=f'"{tick}"', allow_blank=True)
+            # Ordered checkbox: empty box by default, pick the ticked box to
+            # mark it ordered. Row greys out when ticked.
+            unticked, ticked = '☐', '☑'
+            oc_idx = idx['ordered'] + 1
+            oc = get_column_letter(oc_idx)
+            dv = DataValidation(
+                type='list', formula1=f'"{unticked},{ticked}"', allow_blank=True)
             dv.promptTitle = 'Ordered?'
-            dv.prompt = 'Pick the tick to mark this line as ordered'
+            dv.prompt = 'Tick the box to mark this line as ordered'
             ws.add_data_validation(dv)
             dv.add(f'{oc}{first}:{oc}{last}')
             for r in range(first, last + 1):
-                ws.cell(row=r, column=idx['ordered'] + 1).alignment = Alignment(
-                    horizontal='center')
+                cellv = ws.cell(row=r, column=oc_idx)
+                cellv.value = unticked
+                cellv.alignment = Alignment(horizontal='center')
             ws.conditional_formatting.add(
                 f'A{first}:{get_column_letter(n)}{last}',
-                FormulaRule(formula=[f'${oc}{first}="{tick}"'],
+                FormulaRule(formula=[f'${oc}{first}="{ticked}"'],
                             fill=ordered_fill, font=ordered_font),
             )
 
