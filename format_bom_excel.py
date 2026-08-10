@@ -289,9 +289,9 @@ def main() -> None:
     if missing:
         print(
             f"Reminder: {missing} part(s) have no lead time set. "
-            "Add it in InvenTree (Supplier Part Notes: 'lead_time: 14', or a "
-            "'Lead Time (days)' part parameter). The amber cells in the sheet "
-            "show which ones."
+            "Add it to the Part in InvenTree (Part > Parameters: 'Lead Time "
+            "(days)', or Part > Notes: 'lead_time: 14'). The amber cells in the "
+            "sheet show which ones."
         )
 
 
