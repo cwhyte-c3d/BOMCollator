@@ -160,6 +160,16 @@ def format_workbook(input_path: Path, output_path: Path) -> None:
     # Put the TOTAL label in the Part column (or the first column as a fallback).
     label_col = kept.index("Part") if "Part" in kept else 0
     total_row[label_col] = TOTAL_LABEL
+
+    # Longest lead time drives when the whole build can start, so total the
+    # lead-time column as a MAX, not a sum.
+    lead_values = [
+        _to_number(cell(r, LEAD_COLUMN)) for r in data
+    ]
+    lead_values = [v for v in lead_values if v is not None]
+    if lead_values and LEAD_COLUMN in kept:
+        total_row[kept.index(LEAD_COLUMN)] = round(max(lead_values), 4)
+
     sheet.append(total_row)
 
     missing = _apply_styles(sheet, kept, data_rows=len(data))
@@ -269,6 +279,18 @@ def _apply_styles(sheet, header, data_rows) -> int:
                 lead_cell.fill = MISSING_FILL
                 dc.fill = MISSING_FILL
                 dc.font = MISSING_FONT
+
+        # TOTAL row: the longest lead time, and the date everything would land.
+        total_lead = sheet.cell(row=total_row_idx, column=lead_c)
+        if _to_number(total_lead.value) is not None:
+            total_lead.comment = Comment(
+                "Longest lead time across all parts - drives when the whole "
+                "build can start once everything is ordered.", "BOM Collator"
+            )
+            td = sheet.cell(row=total_row_idx, column=delivery_c)
+            td.value = f'=TODAY()+${lead_col}{total_row_idx}'
+            td.number_format = DATE_FORMAT
+            td.alignment = Alignment(horizontal="center")
 
     # TOTAL row.
     for c in range(1, len(header) + 1):
