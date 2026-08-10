@@ -35,7 +35,9 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 
 # --- Column names -----------------------------------------------------------
-DROP_COLUMNS = ["IPN", "Supplier SKU", "Pack Size", "BOM Lines", "Reference"]
+DROP_COLUMNS = ["IPN", "Supplier SKU", "Pack Size", "Reference"]
+# Rename source columns to friendlier headings (handles older exports too).
+RENAME_COLUMNS = {"BOM Lines": "Recurrences"}
 DESCRIPTION_COLUMN = "Description"
 STOCK_FLAG_COLUMN = "Enough In Stock"
 LEAD_COLUMN = "Lead Time (days)"
@@ -161,6 +163,13 @@ def format_workbook(input_path: Path, output_path: Path) -> None:
     sheet.append(total_row)
 
     missing = _apply_styles(sheet, kept, data_rows=len(data))
+
+    # Friendlier headings (e.g. BOM Lines -> Recurrences). Cosmetic, done last
+    # so column detection above still uses the original names.
+    for c in range(1, sheet.max_column + 1):
+        label = sheet.cell(row=1, column=c).value
+        if label in RENAME_COLUMNS:
+            sheet.cell(row=1, column=c).value = RENAME_COLUMNS[label]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out.save(output_path)

@@ -120,7 +120,7 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
         'a single line each, with true total quantities, a stock check and '
         'pack-rounded order pricing.'
     )
-    VERSION = '0.3.1'
+    VERSION = '0.3.2'
     AUTHOR = _('Contour3D')
 
     ExportOptionsSerializer = CollatedBomOptionsSerializer
@@ -562,7 +562,6 @@ class CollatedBomExporterPlugin(DataExportMixin, InvenTreePlugin):
             columns['line_total'] = _('Line Total')
             columns['lead_time'] = _('Lead Time (days)')
 
-        columns['occurrences'] = _('BOM Lines')
-        columns['reference'] = _('Reference')
+        columns['occurrences'] = _('Recurrences')
         columns['description'] = _('Description')
         return columns
