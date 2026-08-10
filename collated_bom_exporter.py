@@ -135,7 +135,7 @@ class CollatedBomExporterPlugin(
         'a single line each, with true total quantities, a stock check and '
         'pack-rounded order pricing.'
     )
-    VERSION = '0.4.1'
+    VERSION = '0.4.2'
     AUTHOR = _('Contour3D')
 
     ExportOptionsSerializer = CollatedBomOptionsSerializer
@@ -659,11 +659,12 @@ class CollatedBomExporterPlugin(
                 'title': _('Collated BOM'),
                 'label': _('Collated BOM'),
                 'icon': 'ti:file-spreadsheet:outline',
-                'source': self.plugin_static_file('panel.js')
-                if hasattr(self, 'plugin_static_file')
-                else f'/plugin/{self.SLUG}/panel.js',
+                # Served by this plugin's own URL (see serve_panel_js), not a
+                # static file.
+                'source': f'/plugin/{self.SLUG}/panel.js',
                 'context': {
                     'download_url': f'/plugin/{self.SLUG}/download/{pk}/',
+                    'pk': pk,
                 },
             }
         ]
@@ -673,25 +674,37 @@ class CollatedBomExporterPlugin(
         from django.http import HttpResponse
 
         js = """
-export function renderPanel(target, context) {
-    const el = (target && target.ref) ? target.ref : target;
-    let pk = '';
-    if (context) {
-        pk = context.id || context.pk || context.target_id ||
-             (context.instance && context.instance.pk) || '';
-        if (context.context && context.context.download_url) {
-            renderLink(el, context.context.download_url);
-            return;
-        }
+// InvenTree may call renderPanel(target, context) or renderPanel({target,
+// context, ...}). Handle both, and dig the download URL / part id out of
+// whatever shape the context arrives in.
+export function renderPanel(a, b) {
+    let target = a;
+    let ctx = b;
+    if (a && typeof a === 'object' && (a.target || a.ref || a.model)) {
+        target = a.target || a.ref;
+        ctx = a.context || a;
     }
-    renderLink(el, '/plugin/collated-bom-exporter/download/' + pk + '/');
+    const el = (target && target.ref) ? target.ref : target;
+
+    let url = '';
+    let pk = '';
+    if (ctx) {
+        const inner = ctx.context || ctx;
+        url = inner.download_url || '';
+        pk = inner.pk || inner.id || inner.target_id ||
+             (inner.instance && inner.instance.pk) || '';
+    }
+    if (!url) {
+        url = '/plugin/collated-bom-exporter/download/' + pk + '/';
+    }
+    renderLink(el, url);
 }
 
 function renderLink(el, url) {
     if (!el) { return; }
     el.innerHTML =
         '<div style="padding:1rem;">' +
-        '<a href="' + url + '" ' +
+        '<a href="' + url + '" download ' +
         'style="display:inline-block;padding:10px 18px;background:#1F2A37;' +
         'color:#fff;border-radius:6px;text-decoration:none;font-weight:600;">' +
         'Download collated BOM (Excel)</a>' +
@@ -703,7 +716,10 @@ function renderLink(el, url) {
 
 export default renderPanel;
 """
-        return HttpResponse(js, content_type='application/javascript')
+        response = HttpResponse(js, content_type='application/javascript')
+        # Allow the frontend to import it as a module without cache surprises.
+        response['Cache-Control'] = 'no-cache'
+        return response
 
     def download_formatted_bom(self, request, pk):
         """Build and return the fully styled collated BOM for a part."""
