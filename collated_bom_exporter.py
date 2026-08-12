@@ -148,6 +148,14 @@ class CollatedBomExporterPlugin(
             'description': 'Country site for availability/lead times (e.g. AU).',
             'default': 'AU',
         },
+        'DIGIKEY_INSTOCK_LEAD_DAYS': {
+            'name': 'DigiKey in-stock shipping days',
+            'description': 'Lead time to use when DigiKey has the part in stock '
+                           '(their delivery time to you). Out-of-stock parts use '
+                           'the manufacturer lead weeks instead.',
+            'default': '7',
+            'validator': int,
+        },
     }
 
     NAME = 'Collated BOM Exporter'
@@ -158,7 +166,7 @@ class CollatedBomExporterPlugin(
         'a single line each, with true total quantities, a stock check and '
         'pack-rounded order pricing.'
     )
-    VERSION = '0.5.0'
+    VERSION = '0.5.1'
     AUTHOR = _('Contour3D')
 
     ExportOptionsSerializer = CollatedBomOptionsSerializer
@@ -653,6 +661,8 @@ class CollatedBomExporterPlugin(
             path('panel.js', self.serve_panel_js, name='collated-bom-panel-js'),
             path('digikey-test/', self.digikey_test,
                  name='collated-bom-digikey-test'),
+            path('digikey-apply/', self.digikey_apply,
+                 name='collated-bom-digikey-apply'),
         ]
 
     # ---- Part-page button (custom UI panel) --------------------------------
@@ -813,11 +823,29 @@ export default renderPanel;
             match = re.search(r'\d+(?:\.\d+)?', str(lead_raw))
             if match:
                 weeks = float(match.group(0))
-        lead_days = int(round(weeks * 7)) if weeks is not None else None
+        factory_days = int(round(weeks * 7)) if weeks is not None else None
+
+        qty = product.get('QuantityAvailable')
+        try:
+            qty_num = float(qty)
+        except (TypeError, ValueError):
+            qty_num = 0
+
+        # In stock -> real shipping time; out of stock -> factory lead weeks.
+        if qty_num and qty_num > 0:
+            try:
+                effective_days = int(self.get_setting('DIGIKEY_INSTOCK_LEAD_DAYS') or 7)
+            except (TypeError, ValueError):
+                effective_days = 7
+        else:
+            effective_days = factory_days
+
         return {
             'lead_weeks': lead_raw,
-            'lead_days': lead_days,
-            'qty': product.get('QuantityAvailable'),
+            'factory_days': factory_days,
+            'effective_days': effective_days,
+            'qty': qty,
+            'in_stock': qty_num > 0,
             'error': None,
         }
 
@@ -847,12 +875,14 @@ export default renderPanel;
             part_name = getattr(getattr(sp, 'part', None), 'name', '') or ''
             info = self._digikey_lookup(token, sku) if sku else {'error': 'no SKU'}
             if info.get('error'):
-                cells = f'<td colspan="3" style="color:#b00">{info["error"]}</td>'
+                cells = f'<td colspan="4" style="color:#b00">{info["error"]}</td>'
             else:
+                stock = 'In stock' if info.get('in_stock') else 'Out of stock'
                 cells = (
+                    f'<td><b>{info.get("effective_days")}</b></td>'
+                    f'<td>{stock} ({info.get("qty")})</td>'
+                    f'<td>{info.get("factory_days")}</td>'
                     f'<td>{info.get("lead_weeks")}</td>'
-                    f'<td><b>{info.get("lead_days")}</b></td>'
-                    f'<td>{info.get("qty")}</td>'
                 )
             rows.append(
                 f'<tr><td>{part_name}</td><td>{sku}</td>{cells}</tr>'
@@ -860,12 +890,94 @@ export default renderPanel;
 
         html = (
             '<h3>DigiKey lead-time test (read-only, nothing saved)</h3>'
-            f'<p>Checked {len(parts)} DigiKey supplier parts.</p>'
+            f'<p>Checked {len(parts)} DigiKey supplier parts. '
+            '<b>Lead days</b> is what would be written: in-stock parts use the '
+            'shipping estimate, out-of-stock use the factory lead weeks.</p>'
             '<table border="1" cellpadding="6" cellspacing="0" '
             'style="border-collapse:collapse;font-family:sans-serif;">'
             '<tr style="background:#1F2A37;color:#fff;">'
-            '<th>Part</th><th>DigiKey SKU</th><th>Lead (raw)</th>'
-            '<th>Lead days</th><th>Qty avail</th></tr>'
+            '<th>Part</th><th>DigiKey SKU</th><th>Lead days</th>'
+            '<th>Stock</th><th>Factory days</th><th>Factory (weeks)</th></tr>'
+            + ''.join(rows) + '</table>'
+            '<p style="margin-top:14px;font-family:sans-serif;">Happy with these? '
+            'Visit <b>digikey-apply/</b> to write them into each part as a '
+            'Lead Time (days) value - it only fills parts that have no lead time '
+            'set, so your own numbers are never overwritten.</p>'
+        )
+        return HttpResponse(html, content_type='text/html')
+
+    def _set_part_lead_time(self, part, days):
+        """Write a lead time onto a part, only if it has none. Returns action.
+
+        Uses a 'Lead Time (days)' part parameter (created once if missing).
+        Never overwrites an existing value, so manual entries always win.
+        """
+        from part.models import PartParameter, PartParameterTemplate
+
+        if days is None:
+            return 'skipped (no lead time)'
+
+        template, _created = PartParameterTemplate.objects.get_or_create(
+            name='Lead Time (days)',
+            defaults={'units': 'day'},
+        )
+        existing = PartParameter.objects.filter(part=part, template=template).first()
+        if existing and str(existing.data).strip() not in ('', 'None'):
+            return 'skipped (already set)'
+
+        PartParameter.objects.update_or_create(
+            part=part, template=template,
+            defaults={'data': str(int(days))},
+        )
+        return f'set {int(days)}'
+
+    def digikey_apply(self, request):
+        """Fetch DigiKey lead times and write them into parts (only if empty)."""
+        from company.models import SupplierPart
+
+        token, error = self._digikey_token()
+        if error:
+            return HttpResponse(
+                f'<h3>DigiKey apply</h3><p style="color:#b00">{error}</p>',
+                content_type='text/html',
+            )
+
+        parts = list(
+            SupplierPart.objects.filter(
+                supplier__name__icontains='digikey'
+            ).select_related('part', 'supplier')
+        )
+
+        rows = []
+        set_count = 0
+        for sp in parts:
+            sku = getattr(sp, 'SKU', '') or ''
+            part = getattr(sp, 'part', None)
+            name = getattr(part, 'name', '') or ''
+            if not sku or part is None:
+                rows.append(f'<tr><td>{name}</td><td>{sku}</td><td>no SKU/part</td></tr>')
+                continue
+            info = self._digikey_lookup(token, sku)
+            if info.get('error'):
+                rows.append(
+                    f'<tr><td>{name}</td><td>{sku}</td>'
+                    f'<td style="color:#b00">{info["error"][:80]}</td></tr>')
+                continue
+            action = self._set_part_lead_time(part, info.get('effective_days'))
+            if action.startswith('set'):
+                set_count += 1
+            rows.append(
+                f'<tr><td>{name}</td><td>{sku}</td>'
+                f'<td>{info.get("effective_days")} days - {action}</td></tr>')
+
+        html = (
+            '<h3>DigiKey apply - lead times written to parts</h3>'
+            f'<p>Checked {len(parts)} DigiKey parts, set lead time on '
+            f'<b>{set_count}</b> (only ones that had none).</p>'
+            '<table border="1" cellpadding="6" cellspacing="0" '
+            'style="border-collapse:collapse;font-family:sans-serif;">'
+            '<tr style="background:#1F2A37;color:#fff;">'
+            '<th>Part</th><th>DigiKey SKU</th><th>Result</th></tr>'
             + ''.join(rows) + '</table>'
         )
         return HttpResponse(html, content_type='text/html')
