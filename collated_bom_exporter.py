@@ -29,7 +29,7 @@ from InvenTree.helpers import normalize
 from part.models import BomItem, Part
 from part.serializers import BomItemSerializer
 from plugin import InvenTreePlugin
-from plugin.mixins import DataExportMixin, UrlsMixin
+from plugin.mixins import DataExportMixin, SettingsMixin, UrlsMixin
 
 try:
     # UserInterfaceMixin adds the part-page panel/button. Available on newer
@@ -123,9 +123,32 @@ class CollatedBomOptionsSerializer(serializers.Serializer):
 
 
 class CollatedBomExporterPlugin(
-    DataExportMixin, UrlsMixin, UserInterfaceMixin, InvenTreePlugin
+    DataExportMixin, UrlsMixin, SettingsMixin, UserInterfaceMixin, InvenTreePlugin
 ):
     """Export a BOM with identical parts collated into one line each."""
+
+    # DigiKey API settings. The user enters these in the plugin settings inside
+    # InvenTree; the secret is protected so it is never shown back.
+    SETTINGS = {
+        'DIGIKEY_CLIENT_ID': {
+            'name': 'DigiKey Client ID',
+            'description': 'Client ID from your DigiKey developer app '
+                           '(Product Information API).',
+            'default': '',
+        },
+        'DIGIKEY_CLIENT_SECRET': {
+            'name': 'DigiKey Client Secret',
+            'description': 'Client Secret from your DigiKey developer app. '
+                           'Stored securely; never shown back.',
+            'default': '',
+            'protected': True,
+        },
+        'DIGIKEY_LOCALE_SITE': {
+            'name': 'DigiKey locale site',
+            'description': 'Country site for availability/lead times (e.g. AU).',
+            'default': 'AU',
+        },
+    }
 
     NAME = 'Collated BOM Exporter'
     SLUG = 'collated-bom-exporter'
@@ -135,7 +158,7 @@ class CollatedBomExporterPlugin(
         'a single line each, with true total quantities, a stock check and '
         'pack-rounded order pricing.'
     )
-    VERSION = '0.4.3'
+    VERSION = '0.5.0'
     AUTHOR = _('Contour3D')
 
     ExportOptionsSerializer = CollatedBomOptionsSerializer
@@ -628,6 +651,8 @@ class CollatedBomExporterPlugin(
             path('download/<int:pk>/', self.download_formatted_bom,
                  name='collated-bom-download'),
             path('panel.js', self.serve_panel_js, name='collated-bom-panel-js'),
+            path('digikey-test/', self.digikey_test,
+                 name='collated-bom-digikey-test'),
         ]
 
     # ---- Part-page button (custom UI panel) --------------------------------
@@ -720,6 +745,130 @@ export default renderPanel;
         # Allow the frontend to import it as a module without cache surprises.
         response['Cache-Control'] = 'no-cache'
         return response
+
+    # ---- DigiKey lead-time lookup (read-only test) -------------------------
+
+    DIGIKEY_TOKEN_URL = 'https://api.digikey.com/v1/oauth2/token'
+    DIGIKEY_DETAILS_URL = 'https://api.digikey.com/products/v4/search/{pn}/productdetails'
+
+    def _digikey_token(self):
+        """Fetch a 2-legged OAuth access token. Returns (token, error)."""
+        import requests
+
+        client_id = (self.get_setting('DIGIKEY_CLIENT_ID') or '').strip()
+        client_secret = (self.get_setting('DIGIKEY_CLIENT_SECRET') or '').strip()
+        if not client_id or not client_secret:
+            return None, 'DigiKey Client ID / Secret not set in plugin settings.'
+
+        try:
+            resp = requests.post(
+                self.DIGIKEY_TOKEN_URL,
+                data={
+                    'client_id': client_id,
+                    'client_secret': client_secret,
+                    'grant_type': 'client_credentials',
+                },
+                timeout=20,
+            )
+        except Exception as exc:
+            return None, f'Token request failed: {exc}'
+
+        if resp.status_code != 200:
+            return None, f'Token error {resp.status_code}: {resp.text[:200]}'
+        return resp.json().get('access_token'), None
+
+    def _digikey_lookup(self, token, product_number):
+        """Look up one DigiKey part. Returns dict with lead_days / qty / error."""
+        import re
+
+        import requests
+
+        client_id = (self.get_setting('DIGIKEY_CLIENT_ID') or '').strip()
+        locale = (self.get_setting('DIGIKEY_LOCALE_SITE') or 'AU').strip()
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'X-DIGIKEY-Client-Id': client_id,
+            'X-DIGIKEY-Locale-Site': locale,
+            'X-DIGIKEY-Locale-Language': 'en',
+            'X-DIGIKEY-Locale-Currency': 'AUD',
+            'Accept': 'application/json',
+        }
+        url = self.DIGIKEY_DETAILS_URL.format(pn=product_number)
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+        except Exception as exc:
+            return {'error': f'{exc}'}
+
+        if resp.status_code != 200:
+            return {'error': f'HTTP {resp.status_code}: {resp.text[:160]}'}
+
+        try:
+            product = resp.json().get('Product', {}) or {}
+        except Exception:
+            return {'error': 'Bad JSON response'}
+
+        lead_raw = product.get('ManufacturerLeadWeeks')
+        weeks = None
+        if lead_raw is not None:
+            match = re.search(r'\d+(?:\.\d+)?', str(lead_raw))
+            if match:
+                weeks = float(match.group(0))
+        lead_days = int(round(weeks * 7)) if weeks is not None else None
+        return {
+            'lead_weeks': lead_raw,
+            'lead_days': lead_days,
+            'qty': product.get('QuantityAvailable'),
+            'error': None,
+        }
+
+    def digikey_test(self, request):
+        """Read-only: show what DigiKey returns for your DigiKey parts.
+
+        Writes nothing. Lets you check accuracy before enabling write-back.
+        """
+        from company.models import SupplierPart
+
+        token, error = self._digikey_token()
+        if error:
+            return HttpResponse(
+                f'<h3>DigiKey test</h3><p style="color:#b00">{error}</p>',
+                content_type='text/html',
+            )
+
+        parts = list(
+            SupplierPart.objects.filter(
+                supplier__name__icontains='digikey'
+            ).select_related('part', 'supplier')[:15]
+        )
+
+        rows = []
+        for sp in parts:
+            sku = getattr(sp, 'SKU', '') or ''
+            part_name = getattr(getattr(sp, 'part', None), 'name', '') or ''
+            info = self._digikey_lookup(token, sku) if sku else {'error': 'no SKU'}
+            if info.get('error'):
+                cells = f'<td colspan="3" style="color:#b00">{info["error"]}</td>'
+            else:
+                cells = (
+                    f'<td>{info.get("lead_weeks")}</td>'
+                    f'<td><b>{info.get("lead_days")}</b></td>'
+                    f'<td>{info.get("qty")}</td>'
+                )
+            rows.append(
+                f'<tr><td>{part_name}</td><td>{sku}</td>{cells}</tr>'
+            )
+
+        html = (
+            '<h3>DigiKey lead-time test (read-only, nothing saved)</h3>'
+            f'<p>Checked {len(parts)} DigiKey supplier parts.</p>'
+            '<table border="1" cellpadding="6" cellspacing="0" '
+            'style="border-collapse:collapse;font-family:sans-serif;">'
+            '<tr style="background:#1F2A37;color:#fff;">'
+            '<th>Part</th><th>DigiKey SKU</th><th>Lead (raw)</th>'
+            '<th>Lead days</th><th>Qty avail</th></tr>'
+            + ''.join(rows) + '</table>'
+        )
+        return HttpResponse(html, content_type='text/html')
 
     def download_formatted_bom(self, request, pk):
         """Build and return the fully styled collated BOM for a part."""
